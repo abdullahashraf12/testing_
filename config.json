@@ -133,6 +133,13 @@
 
     "swap": {
         "enabled": false,
+        "policy": "preferred",
+        "_comment_policy": [
+            "Swap policy options:",
+            "  - 'required': abort if swap cannot be created",
+            "  - 'preferred': continue without swap if setup fails (recommended)",
+            "  - 'disabled': never attempt swap creation"
+        ],
         "_comment_enabled": [
             "Enable swap file creation for additional memory",
             "Use --use-swap CLI argument to enable",

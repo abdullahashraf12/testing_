@@ -31,6 +31,7 @@ import signal
 import time
 from pathlib import Path
 from typing import Dict, Optional, Any
+from dataclasses import dataclass, asdict
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent
@@ -58,6 +59,18 @@ from utils.memory_tracker import MemoryTracker
 
 # Setup logger
 logger = setup_logger(__name__)
+
+
+@dataclass
+class RuntimePlan:
+    """Resolved runtime execution plan"""
+    selected_backend: str
+    streaming_mode: bool
+    offload_mode: str
+    swap_mode: str
+    precision_mode: str
+    extreme_slow_mode: bool
+    strict_compat: bool
 
 
 # ============================================================================
@@ -145,6 +158,13 @@ IMPORTANT:
         type=int,
         default=None,
         help="Swap size in GB (auto-calculated if not specified)"
+    )
+    parser.add_argument(
+        "--swap-policy",
+        type=str,
+        choices=["required", "preferred", "disabled"],
+        default=None,
+        help="Swap policy: required (fail if unavailable), preferred (warn), disabled (never create)"
     )
     parser.add_argument(
         "--swap-path",
@@ -240,6 +260,16 @@ IMPORTANT:
         action="store_true",
         help="Force Accelerate loading path instead of DeepSpeed runtime"
     )
+    parser.add_argument(
+        "--strict-compat",
+        action="store_true",
+        help="Fail fast when compatibility checks detect unsupported hardware/runtime"
+    )
+    parser.add_argument(
+        "--extreme-slow-mode",
+        action="store_true",
+        help="Prioritize eventual completion over speed with conservative generation settings"
+    )
     
     # ===================
     # Config file
@@ -268,6 +298,12 @@ IMPORTANT:
         "--verbose", "-v",
         action="store_true",
         help="Enable verbose output"
+    )
+    parser.add_argument(
+        "--startup-report-path",
+        type=str,
+        default="./startup_report.json",
+        help="Path to save resolved startup/runtime report"
     )
     
     return parser.parse_args()
@@ -318,6 +354,7 @@ def merge_config_with_args(config: Dict, args: argparse.Namespace) -> Dict:
     merged['use_swap'] = args.use_swap or swap_cfg.get('enabled', False)
     merged['swap_path'] = _pick(args.swap_path, swap_cfg.get('path'), './model_swap')
     merged['swap_size'] = args.swap_size
+    merged['swap_policy'] = _pick(args.swap_policy, swap_cfg.get('policy'), 'preferred')
     if merged['swap_size'] is None and swap_cfg.get('size_gb') != 'auto':
         merged['swap_size'] = swap_cfg.get('size_gb')
     
@@ -339,8 +376,60 @@ def merge_config_with_args(config: Dict, args: argparse.Namespace) -> Dict:
     
     # Runtime backend
     merged['use_deepspeed'] = (not args.disable_deepspeed) and merged['nvme_offload']
+    merged['strict_compat'] = args.strict_compat
+    merged['extreme_slow_mode'] = args.extreme_slow_mode
 
     return merged
+
+
+def build_runtime_plan(merged: Dict) -> RuntimePlan:
+    """Build resolved runtime plan from merged config."""
+    return RuntimePlan(
+        selected_backend="deepspeed" if merged['use_deepspeed'] else "accelerate",
+        streaming_mode=not merged.get('extreme_slow_mode', False) and merged['stream'],
+        offload_mode="nvme" if merged['nvme_offload'] else ("cpu" if merged['cpu_offload'] else "none"),
+        swap_mode=merged.get('swap_policy', 'preferred'),
+        precision_mode=merged['precision'],
+        extreme_slow_mode=merged.get('extreme_slow_mode', False),
+        strict_compat=merged.get('strict_compat', False)
+    )
+
+
+def run_compatibility_checks(merged: Dict, gpu_info: Dict, ram_info: Dict, disk_info: Dict) -> Dict:
+    """
+    Run compatibility checks. Returns report with warnings/errors.
+    """
+    report = {"warnings": [], "errors": []}
+    
+    if gpu_info['total_vram_gb'] <= 0:
+        report["errors"].append("No NVIDIA GPU detected via nvidia-smi.")
+    
+    if merged['precision'] == 'bf16':
+        cuda_version = gpu_info.get('cuda_version', 'Unknown')
+        if cuda_version == 'Unknown':
+            report["warnings"].append("BF16 selected but CUDA version is unknown.")
+    
+    if merged['nvme_offload'] and disk_info.get('free_gb', 0) < 50:
+        report["warnings"].append(
+            f"Low offload disk space ({disk_info.get('free_gb', 0):.2f} GB). Large models may fail."
+        )
+    
+    if ram_info.get('available_ram_gb', 0) < 8:
+        report["warnings"].append("Available system RAM is very low (<8GB). Expect severe slowdown or failure.")
+    
+    return report
+
+
+def save_startup_report(path: str, merged: Dict, runtime_plan: RuntimePlan, compat_report: Dict):
+    """Persist startup report for operator diagnostics."""
+    payload = {
+        "timestamp": int(time.time()),
+        "merged_config": merged,
+        "runtime_plan": asdict(runtime_plan),
+        "compatibility": compat_report
+    }
+    with open(path, 'w') as f:
+        json.dump(payload, f, indent=2)
 
 
 # ============================================================================
@@ -384,6 +473,18 @@ def main():
     # Print hardware info
     print_hardware_info(gpu_info, ram_info, disk_info)
     
+    runtime_plan = build_runtime_plan(merged)
+    compat_report = run_compatibility_checks(merged, gpu_info, ram_info, disk_info)
+    for warning in compat_report["warnings"]:
+        logger.warning(f"[compat] {warning}")
+    for error in compat_report["errors"]:
+        logger.error(f"[compat] {error}")
+    
+    if runtime_plan.strict_compat and (compat_report["warnings"] or compat_report["errors"]):
+        logger.error("Strict compatibility mode enabled and issues were detected. Aborting.")
+        save_startup_report(args.startup_report_path, merged, runtime_plan, compat_report)
+        return 1
+    
     # Verify CUDA availability
     if gpu_info['total_vram_gb'] == 0:
         logger.error("No NVIDIA GPU detected or nvidia-smi not available!")
@@ -422,7 +523,8 @@ def main():
     # STEP 3: Swap Management (Optional)
     # ===================
     swap_manager = None
-    if merged['use_swap']:
+    swap_policy = merged.get('swap_policy', 'preferred')
+    if merged['use_swap'] and swap_policy != 'disabled':
         print_step(3, "Swap Management")
         
         swap_manager = SwapManager(
@@ -442,8 +544,14 @@ def main():
         if swap_manager.create_swap():
             print(f"✓ Swap file created: {merged['swap_path']} ({merged['swap_size']} GB)")
         else:
+            if swap_policy == 'required':
+                logger.error("Swap policy is 'required' and swap creation failed. Aborting.")
+                save_startup_report(args.startup_report_path, merged, runtime_plan, compat_report)
+                return 1
             logger.warning("Failed to create swap file, continuing without swap")
             swap_manager = None
+    elif swap_policy == 'disabled':
+        logger.info("Swap policy is disabled; skipping swap setup.")
     
     # Setup cleanup on exit
     def cleanup_handler(signum=None, frame=None):
@@ -484,6 +592,9 @@ def main():
     
     print(f"✓ DeepSpeed config saved to: {ds_config_path}")
     print_config_summary(ds_config)
+    
+    save_startup_report(args.startup_report_path, merged, runtime_plan, compat_report)
+    logger.info(f"Startup report saved: {args.startup_report_path}")
     
     # ===================
     # STEP 5: Load Model
@@ -548,7 +659,20 @@ def main():
         
         start_time = time.time()
         
-        if merged['stream']:
+        if runtime_plan.extreme_slow_mode:
+            logger.warning("Extreme slow mode enabled: using chunked generation for completion-first behavior.")
+            long_engine = LongTextGenerator(
+                model=model,
+                tokenizer=tokenizer,
+                deepspeed_config=ds_config if merged['use_deepspeed'] else None
+            )
+            output = long_engine.generate_in_chunks(
+                prompt=merged['prompt'],
+                total_tokens=merged['max_tokens'],
+                chunk_size=max(64, min(256, merged['max_tokens']))
+            )
+            print(output)
+        elif merged['stream']:
             # Streaming output
             output = ""
             for token in engine.generate(

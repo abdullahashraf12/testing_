@@ -1,6 +1,6 @@
 # 🚀 HF-LLM-RUNNER
 
-**Run ANY HuggingFace LLM on ANY NVIDIA GPU with DeepSpeed ZeRO-3 SSD Offloading**
+**Run HuggingFace LLMs on NVIDIA GPUs with DeepSpeed ZeRO-3 SSD Offloading**
 
 This tool enables running large language models (including 120B+ parameter models) on consumer hardware with limited VRAM, using DeepSpeed ZeRO-3 with CPU and SSD offloading.
 
@@ -13,7 +13,7 @@ This tool enables running large language models (including 120B+ parameter model
 | **NO QUANTIZATION** | Full precision (FP16/BF16/FP32) - no quality loss |
 | **Dynamic VRAM Detection** | Automatically detects and adapts to your GPU |
 | **SSD Offloading** | Load models larger than VRAM + RAM combined |
-| **Universal Compatibility** | Works with ANY HuggingFace model |
+| **Broad Compatibility** | Works with many HuggingFace causal LLMs (see compatibility notes) |
 | **Swap Support** | Optional swap file for extended memory |
 
 ---
@@ -79,6 +79,12 @@ pip install deepspeed[nvme]
 ```bash
 # Run with default model (GPT-120B)
 python run_llm.py
+
+# Strict compatibility mode (fail fast on issues)
+python run_llm.py --strict-compat
+
+# Extreme slow mode (completion-first for low-VRAM systems)
+python run_llm.py --extreme-slow-mode --max-tokens 1000
 
 # Run specific model
 python run_llm.py --model meta-llama/Llama-2-70b-hf
@@ -152,6 +158,16 @@ python run_llm.py \
 python run_llm.py --info
 ```
 
+### Example 6: Swap policy control
+
+```bash
+# Require swap creation or abort
+python run_llm.py --use-swap --swap-policy required
+
+# Prefer swap, but continue if unavailable
+python run_llm.py --use-swap --swap-policy preferred
+```
+
 ### Example 5: Dry Run (Test Configuration)
 
 ```bash
@@ -204,6 +220,13 @@ The `config.json` file provides comprehensive configuration options:
 | `fp32` | 4 bytes/param | Maximum | All CUDA GPUs |
 
 **Note**: This tool does NOT use quantization (8-bit/4-bit). All precision options are full precision.
+
+## ⚠️ Compatibility Notes
+
+- This project targets NVIDIA CUDA environments and large-model offloading workflows.
+- Not every HuggingFace model architecture is guaranteed to work identically.
+- Very low VRAM systems may run in extreme-slow conditions (completion-first, throughput may be very low).
+- Use `--strict-compat` to fail fast when compatibility checks detect issues.
 
 ---
 
