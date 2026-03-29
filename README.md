@@ -181,6 +181,16 @@ python tools/scenario_matrix.py
 python tools/scenario_matrix.py --execute-dry-run --emit-json ./artifacts/scenario_matrix.json
 ```
 
+### Example 8: Production ready gate check
+
+```bash
+# Run quick readiness gate checks
+python tools/ready_gate.py
+
+# Save ready gate JSON artifact
+python tools/ready_gate.py --emit-json ./artifacts/ready_gate.json
+```
+
 ### Example 5: Dry Run (Test Configuration)
 
 ```bash
