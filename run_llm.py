@@ -581,7 +581,8 @@ def save_startup_report(
     runtime_plan: RuntimePlan,
     compat_report: Dict,
     performance_class: Optional[str] = None,
-    normalization_actions: Optional[list] = None
+    normalization_actions: Optional[list] = None,
+    failures: Optional[list] = None
 ):
     """Persist startup report for operator diagnostics."""
     payload = {
@@ -591,10 +592,20 @@ def save_startup_report(
         "compatibility": compat_report,
         "performance_class": performance_class,
         "runtime_policy": merged.get("runtime_policy"),
-        "normalization_actions": normalization_actions or []
+        "normalization_actions": normalization_actions or [],
+        "failures": failures or []
     }
     with open(path, 'w') as f:
         json.dump(payload, f, indent=2)
+
+
+def build_failure(code: str, message: str, remediation: str) -> Dict[str, str]:
+    """Create structured failure payload for startup reports."""
+    return {
+        "code": code,
+        "message": message,
+        "remediation": remediation
+    }
 
 
 # ============================================================================
@@ -607,6 +618,7 @@ def main():
     
     # Print banner
     print_banner()
+    startup_failures = []
     
     # ===================
     # STEP 0: Info mode
@@ -658,13 +670,21 @@ def main():
     
     if runtime_plan.strict_compat and (compat_report["warnings"] or compat_report["errors"]):
         logger.error("Strict compatibility mode enabled and issues were detected. Aborting.")
+        startup_failures.append(
+            build_failure(
+                code="COMPAT_STRICT_FAILED",
+                message="Strict compatibility mode blocked startup due to detected warnings/errors.",
+                remediation="Disable --strict-compat or adjust hardware/config/runtime policy."
+            )
+        )
         save_startup_report(
             args.startup_report_path,
             merged,
             runtime_plan,
             compat_report,
             performance_class=performance_class,
-            normalization_actions=normalization_actions
+            normalization_actions=normalization_actions,
+            failures=startup_failures
         )
         return 1
     
@@ -672,6 +692,22 @@ def main():
     if gpu_info['total_vram_gb'] == 0:
         logger.error("No NVIDIA GPU detected or nvidia-smi not available!")
         logger.error("This tool requires an NVIDIA GPU with CUDA drivers installed.")
+        startup_failures.append(
+            build_failure(
+                code="NVIDIA_SMI_UNAVAILABLE",
+                message="No NVIDIA GPU detected or nvidia-smi not available.",
+                remediation="Install NVIDIA drivers/CUDA and ensure nvidia-smi is available in PATH."
+            )
+        )
+        save_startup_report(
+            args.startup_report_path,
+            merged,
+            runtime_plan,
+            compat_report,
+            performance_class=performance_class,
+            normalization_actions=normalization_actions,
+            failures=startup_failures
+        )
         return 1
     
     # Override max VRAM if specified
@@ -729,13 +765,21 @@ def main():
         else:
             if swap_policy == 'required':
                 logger.error("Swap policy is 'required' and swap creation failed. Aborting.")
+                startup_failures.append(
+                    build_failure(
+                        code="SWAP_REQUIRED_FAILED",
+                        message="Swap policy required swap creation but setup failed.",
+                        remediation="Run with sufficient privileges/tools or change swap policy to preferred."
+                    )
+                )
                 save_startup_report(
                     args.startup_report_path,
                     merged,
                     runtime_plan,
                     compat_report,
                     performance_class=performance_class,
-                    normalization_actions=normalization_actions
+                    normalization_actions=normalization_actions,
+                    failures=startup_failures
                 )
                 return 1
             logger.warning("Failed to create swap file, continuing without swap")
@@ -789,7 +833,8 @@ def main():
         runtime_plan,
         compat_report,
         performance_class=performance_class,
-        normalization_actions=normalization_actions
+        normalization_actions=normalization_actions,
+        failures=startup_failures
     )
     logger.info(f"Startup report saved: {args.startup_report_path}")
     
@@ -829,6 +874,22 @@ def main():
         
     except Exception as e:
         logger.error(f"Failed to load model: {e}")
+        startup_failures.append(
+            build_failure(
+                code="MODEL_LOAD_FAILED",
+                message=str(e),
+                remediation="Check auth token/model id, reduce memory pressure, or switch runtime policy."
+            )
+        )
+        save_startup_report(
+            args.startup_report_path,
+            merged,
+            runtime_plan,
+            compat_report,
+            performance_class=performance_class,
+            normalization_actions=normalization_actions,
+            failures=startup_failures
+        )
         if swap_manager:
             swap_manager.remove_swap()
         return 1

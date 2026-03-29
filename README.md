@@ -234,6 +234,7 @@ The `config.json` file provides comprehensive configuration options:
 - Runtime behavior can be selected by policy pack using `--runtime-policy` and `config.json -> runtime.policy_packs`.
 - Conflicting runtime flags are auto-normalized at startup with explicit warnings in logs.
 - Startup report now includes policy name and normalization actions for auditability.
+- Startup report includes structured failure codes/messages/remediation when startup or model-load fails.
 
 ---
 

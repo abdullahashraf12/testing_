@@ -6,6 +6,7 @@ from run_llm import (
     classify_performance,
     run_compatibility_checks,
     save_startup_report,
+    build_failure,
 )
 
 
@@ -89,8 +90,11 @@ def test_startup_report_persists_normalization_actions(tmp_path):
         compat_report={"warnings": [], "errors": []},
         performance_class="slow",
         normalization_actions=[{"setting": "stream", "from": True, "to": False, "reason": "test"}],
+        failures=[build_failure("TEST_CODE", "test message", "test remediation")],
     )
     with open(path, "r") as f:
         payload = json.load(f)
     assert payload["runtime_policy"] == "deepspeed_strict"
     assert len(payload["normalization_actions"]) == 1
+    assert len(payload["failures"]) == 1
+    assert payload["failures"][0]["code"] == "TEST_CODE"
