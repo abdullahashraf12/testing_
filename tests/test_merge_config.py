@@ -1,6 +1,6 @@
 import argparse
 
-from run_llm import merge_config_with_args, apply_runtime_policy
+from run_llm import merge_config_with_args, apply_runtime_policy, validate_runtime_policy_conflicts
 
 
 def _args(**overrides):
@@ -93,3 +93,19 @@ def test_runtime_policy_pack_applies_overrides():
     assert updated["use_deepspeed"] is True
     assert updated["strict_compat"] is True
     assert updated["stream"] is False
+
+
+def test_validate_runtime_policy_conflicts_normalizes_values():
+    merged = {
+        "extreme_slow_mode": True,
+        "stream": True,
+        "swap_policy": "disabled",
+        "use_swap": True,
+        "disable_deepspeed": True,
+        "use_deepspeed": True,
+        "nvme_offload": False,
+    }
+    normalized = validate_runtime_policy_conflicts(merged)
+    assert normalized["stream"] is False
+    assert normalized["use_swap"] is False
+    assert normalized["use_deepspeed"] is False

@@ -461,6 +461,31 @@ def apply_runtime_policy(merged: Dict) -> Dict:
     return updated
 
 
+def validate_runtime_policy_conflicts(merged: Dict) -> Dict:
+    """
+    Validate and normalize contradictory runtime settings.
+    Returns normalized merged config and emits warnings for auto-resolved conflicts.
+    """
+    normalized = dict(merged)
+    
+    if normalized.get("extreme_slow_mode") and normalized.get("stream"):
+        logger.warning("Conflict: extreme_slow_mode requires non-stream output. Disabling stream.")
+        normalized["stream"] = False
+    
+    if normalized.get("swap_policy") == "disabled" and normalized.get("use_swap"):
+        logger.warning("Conflict: swap_policy=disabled with use_swap=true. Disabling swap setup.")
+        normalized["use_swap"] = False
+    
+    if normalized.get("disable_deepspeed") and normalized.get("use_deepspeed"):
+        logger.warning("Conflict: disable_deepspeed=true with use_deepspeed=true. Forcing use_deepspeed=false.")
+        normalized["use_deepspeed"] = False
+    
+    if normalized.get("use_deepspeed") and not normalized.get("nvme_offload"):
+        logger.warning("DeepSpeed selected without NVMe offload. This is allowed but may be less effective.")
+    
+    return normalized
+
+
 def run_compatibility_checks(
     merged: Dict,
     runtime_plan: RuntimePlan,
@@ -579,6 +604,7 @@ def main():
     else:
         merged = merge_config_with_args({}, args)
     merged = apply_runtime_policy(merged)
+    merged = validate_runtime_policy_conflicts(merged)
     
     # ===================
     # STEP 1: Hardware Detection

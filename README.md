@@ -232,6 +232,7 @@ The `config.json` file provides comprehensive configuration options:
 - Use `--strict-compat` to fail fast when compatibility checks detect issues.
 - Compatibility rules are data-driven through `config.json -> compatibility.profiles`.
 - Runtime behavior can be selected by policy pack using `--runtime-policy` and `config.json -> runtime.policy_packs`.
+- Conflicting runtime flags are auto-normalized at startup with explicit warnings in logs.
 
 ---
 
