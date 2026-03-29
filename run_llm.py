@@ -270,6 +270,12 @@ IMPORTANT:
         action="store_true",
         help="Prioritize eventual completion over speed with conservative generation settings"
     )
+    parser.add_argument(
+        "--runtime-policy",
+        type=str,
+        default=None,
+        help="Named runtime policy pack from config.runtime.policy_packs"
+    )
     
     # ===================
     # Config file
@@ -375,6 +381,7 @@ def merge_config_with_args(config: Dict, args: argparse.Namespace) -> Dict:
     merged['stream'] = _pick(args.stream, config.get('performance', {}).get('stream_output'), True)
     
     # Runtime backend
+    merged['disable_deepspeed'] = args.disable_deepspeed
     merged['use_deepspeed'] = (not args.disable_deepspeed) and merged['nvme_offload']
     merged['strict_compat'] = args.strict_compat
     merged['extreme_slow_mode'] = args.extreme_slow_mode
@@ -382,6 +389,8 @@ def merge_config_with_args(config: Dict, args: argparse.Namespace) -> Dict:
     merged['tested_families'] = config.get(
         'compatibility', {}
     ).get('tested_families', ["llama", "mistral", "mixtral", "falcon", "qwen", "phi", "gemma", "opt", "gpt"])
+    merged['runtime_policy'] = _pick(args.runtime_policy, config.get('runtime', {}).get('policy'), None)
+    merged['policy_packs'] = config.get('runtime', {}).get('policy_packs', {})
 
     return merged
 
@@ -427,6 +436,29 @@ def get_family_profile(merged: Dict, family: str) -> Dict:
     """Get compatibility profile for model family."""
     profiles = merged.get('compatibility_profiles', {})
     return profiles.get(family, profiles.get("default", {}))
+
+
+def apply_runtime_policy(merged: Dict) -> Dict:
+    """Apply named runtime policy pack from config."""
+    policy_name = merged.get("runtime_policy")
+    if not policy_name:
+        return merged
+    
+    packs = merged.get("policy_packs", {})
+    policy = packs.get(policy_name)
+    if not policy:
+        logger.warning(f"Runtime policy '{policy_name}' not found; continuing with merged defaults.")
+        return merged
+    
+    logger.info(f"Applying runtime policy pack: {policy_name}")
+    updated = dict(merged)
+    for key, value in policy.items():
+        updated[key] = value
+    
+    # Recompute dependent backend selection if policy changed nvme/disable flags.
+    if "use_deepspeed" not in policy:
+        updated['use_deepspeed'] = (not updated.get('disable_deepspeed', False)) and updated.get('nvme_offload', True)
+    return updated
 
 
 def run_compatibility_checks(
@@ -546,6 +578,7 @@ def main():
         merged = merge_config_with_args(config, args)
     else:
         merged = merge_config_with_args({}, args)
+    merged = apply_runtime_policy(merged)
     
     # ===================
     # STEP 1: Hardware Detection

@@ -86,6 +86,9 @@ python run_llm.py --strict-compat
 # Extreme slow mode (completion-first for low-VRAM systems)
 python run_llm.py --extreme-slow-mode --max-tokens 1000
 
+# Use a policy pack from config.runtime.policy_packs
+python run_llm.py --runtime-policy deepspeed_strict
+
 # Run specific model
 python run_llm.py --model meta-llama/Llama-2-70b-hf
 
@@ -228,6 +231,7 @@ The `config.json` file provides comprehensive configuration options:
 - Very low VRAM systems may run in extreme-slow conditions (completion-first, throughput may be very low).
 - Use `--strict-compat` to fail fast when compatibility checks detect issues.
 - Compatibility rules are data-driven through `config.json -> compatibility.profiles`.
+- Runtime behavior can be selected by policy pack using `--runtime-policy` and `config.json -> runtime.policy_packs`.
 
 ---
 

@@ -1,6 +1,6 @@
 import argparse
 
-from run_llm import merge_config_with_args
+from run_llm import merge_config_with_args, apply_runtime_policy
 
 
 def _args(**overrides):
@@ -29,6 +29,7 @@ def _args(**overrides):
         "disable_deepspeed": False,
         "strict_compat": False,
         "extreme_slow_mode": False,
+        "runtime_policy": None,
         "config": None,
         "info": False,
         "dry_run": False,
@@ -70,3 +71,25 @@ def test_cli_overrides_config_values():
     assert merged["precision"] == "fp32"
     assert merged["swap_policy"] == "disabled"
     assert merged["use_deepspeed"] is False
+
+
+def test_runtime_policy_pack_applies_overrides():
+    merged = {
+        "use_deepspeed": False,
+        "nvme_offload": True,
+        "stream": True,
+        "strict_compat": False,
+        "extreme_slow_mode": False,
+        "runtime_policy": "deepspeed_strict",
+        "policy_packs": {
+            "deepspeed_strict": {
+                "use_deepspeed": True,
+                "strict_compat": True,
+                "stream": False,
+            }
+        },
+    }
+    updated = apply_runtime_policy(merged)
+    assert updated["use_deepspeed"] is True
+    assert updated["strict_compat"] is True
+    assert updated["stream"] is False

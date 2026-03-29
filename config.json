@@ -272,6 +272,32 @@
         },
         "_comment_profiles": "Per-family compatibility rules (data-driven, can be customized)."
     },
+    
+    "runtime": {
+        "policy": null,
+        "_comment_policy": [
+            "Optional named runtime policy pack from policy_packs.",
+            "Examples: 'deepspeed_strict', 'accelerate_safe', 'extreme_slow_universal'"
+        ],
+        "policy_packs": {
+            "deepspeed_strict": {
+                "use_deepspeed": true,
+                "strict_compat": true,
+                "stream": false
+            },
+            "accelerate_safe": {
+                "use_deepspeed": false,
+                "nvme_offload": false,
+                "stream": true
+            },
+            "extreme_slow_universal": {
+                "extreme_slow_mode": true,
+                "stream": false,
+                "use_swap": true,
+                "swap_policy": "preferred"
+            }
+        }
+    },
 
     "___final_comment___": "============================================================",
     "___quick_start___": [
