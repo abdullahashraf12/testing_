@@ -1,0 +1,56 @@
+# =============================================================================
+# HF-LLM-RUNNER Requirements
+# =============================================================================
+
+# Core ML Libraries
+torch>=2.0.0
+transformers>=4.35.0
+accelerate>=0.24.0
+safetensors>=0.4.0
+
+# DeepSpeed with NVMe offloading support
+# Note: DeepSpeed installation may require specific CUDA version
+# See: https://www.deepspeed.ai/tutorials/advanced-install/
+deepspeed>=0.12.0
+
+# HuggingFace Hub
+huggingface-hub>=0.19.0
+
+# Utilities
+psutil>=5.9.0
+tqdm>=4.66.0
+
+# Optional: For better progress bars
+# rich>=13.0.0
+
+# Optional: Flash Attention 2 (requires CUDA 11.6+)
+# Note: This is optional and may not work on all systems
+# flash-attn>=2.0.0
+
+# =============================================================================
+# Installation Notes:
+# =============================================================================
+#
+# 1. Basic installation:
+#    pip install -r requirements.txt
+#
+# 2. For DeepSpeed with NVMe offloading support, you may need:
+#    pip install deepspeed[nvme]
+#
+# 3. For specific CUDA versions, use:
+#    pip install torch --index-url https://download.pytorch.org/whl/cu118
+#
+# 4. Flash Attention (optional, for faster inference):
+#    pip install flash-attn --no-build-isolation
+#
+# =============================================================================
+# IMPORTANT: NO QUANTIZATION PACKAGES
+# =============================================================================
+# This tool does NOT use quantization (bitsandbytes, auto-gptq, etc.)
+# All models run in full precision: FP16, BF16, or FP32
+#
+# DO NOT install these packages for this tool:
+# - bitsandbytes (8-bit/4-bit quantization) - NOT USED
+# - auto-gptq (GPTQ quantization) - NOT USED
+# - optimum (quantization helpers) - NOT USED
+# =============================================================================
