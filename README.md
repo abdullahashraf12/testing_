@@ -171,6 +171,16 @@ python run_llm.py --use-swap --swap-policy required
 python run_llm.py --use-swap --swap-policy preferred
 ```
 
+### Example 7: Scenario matrix dry-run validation
+
+```bash
+# Print scenario command previews
+python tools/scenario_matrix.py
+
+# Execute matrix in dry-run mode and save JSON report
+python tools/scenario_matrix.py --execute-dry-run --emit-json ./artifacts/scenario_matrix.json
+```
+
 ### Example 5: Dry Run (Test Configuration)
 
 ```bash
