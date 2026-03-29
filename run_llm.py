@@ -395,11 +395,41 @@ def build_runtime_plan(merged: Dict) -> RuntimePlan:
     )
 
 
-def run_compatibility_checks(merged: Dict, gpu_info: Dict, ram_info: Dict, disk_info: Dict) -> Dict:
+def detect_model_family(model_name: str) -> str:
+    """Best-effort model family detection for compatibility hints."""
+    name = model_name.lower()
+    known = [
+        "llama", "mistral", "mixtral", "falcon", "qwen", "gpt", "phi", "gemma", "opt"
+    ]
+    for fam in known:
+        if fam in name:
+            return fam
+    return "unknown"
+
+
+def classify_performance(usable_vram_gb: float, ram_gb: float) -> str:
+    """Classify expected runtime performance tier."""
+    combined = usable_vram_gb + ram_gb
+    if usable_vram_gb >= 40 and ram_gb >= 64:
+        return "interactive"
+    if combined >= 48:
+        return "slow"
+    if combined >= 24:
+        return "very_slow"
+    return "extreme_slow"
+
+
+def run_compatibility_checks(
+    merged: Dict,
+    runtime_plan: RuntimePlan,
+    gpu_info: Dict,
+    ram_info: Dict,
+    disk_info: Dict
+) -> Dict:
     """
     Run compatibility checks. Returns report with warnings/errors.
     """
-    report = {"warnings": [], "errors": []}
+    report = {"warnings": [], "errors": [], "model_family": detect_model_family(merged['model_name'])}
     
     if gpu_info['total_vram_gb'] <= 0:
         report["errors"].append("No NVIDIA GPU detected via nvidia-smi.")
@@ -408,6 +438,8 @@ def run_compatibility_checks(merged: Dict, gpu_info: Dict, ram_info: Dict, disk_
         cuda_version = gpu_info.get('cuda_version', 'Unknown')
         if cuda_version == 'Unknown':
             report["warnings"].append("BF16 selected but CUDA version is unknown.")
+        elif float(cuda_version) < 11.0:
+            report["errors"].append(f"BF16 selected but CUDA version {cuda_version} is likely incompatible.")
     
     if merged['nvme_offload'] and disk_info.get('free_gb', 0) < 50:
         report["warnings"].append(
@@ -417,16 +449,41 @@ def run_compatibility_checks(merged: Dict, gpu_info: Dict, ram_info: Dict, disk_
     if ram_info.get('available_ram_gb', 0) < 8:
         report["warnings"].append("Available system RAM is very low (<8GB). Expect severe slowdown or failure.")
     
+    tested_families = {"llama", "mistral", "mixtral", "falcon", "qwen", "phi", "gemma", "opt", "gpt"}
+    if report["model_family"] == "unknown":
+        report["warnings"].append(
+            "Model family could not be identified as a commonly tested architecture."
+        )
+    elif report["model_family"] not in tested_families:
+        report["warnings"].append(
+            f"Model family '{report['model_family']}' is outside currently tested baseline."
+        )
+    
+    # Backend strict profile checks
+    if runtime_plan.selected_backend == "deepspeed" and merged['nvme_offload']:
+        if disk_info.get('free_gb', 0) < 100:
+            report["warnings"].append("DeepSpeed+NVMe selected with <100GB free disk; large models may fail.")
+    
+    if runtime_plan.selected_backend == "accelerate" and merged['model_name'].lower().endswith("120b"):
+        report["warnings"].append("120B-class model on Accelerate backend may be impractically slow or unstable.")
+    
     return report
 
 
-def save_startup_report(path: str, merged: Dict, runtime_plan: RuntimePlan, compat_report: Dict):
+def save_startup_report(
+    path: str,
+    merged: Dict,
+    runtime_plan: RuntimePlan,
+    compat_report: Dict,
+    performance_class: Optional[str] = None
+):
     """Persist startup report for operator diagnostics."""
     payload = {
         "timestamp": int(time.time()),
         "merged_config": merged,
         "runtime_plan": asdict(runtime_plan),
-        "compatibility": compat_report
+        "compatibility": compat_report,
+        "performance_class": performance_class
     }
     with open(path, 'w') as f:
         json.dump(payload, f, indent=2)
@@ -474,7 +531,16 @@ def main():
     print_hardware_info(gpu_info, ram_info, disk_info)
     
     runtime_plan = build_runtime_plan(merged)
-    compat_report = run_compatibility_checks(merged, gpu_info, ram_info, disk_info)
+    performance_class = classify_performance(
+        usable_vram_gb=gpu_info.get('usable_vram_gb', 0),
+        ram_gb=ram_info.get('available_ram_gb', 0)
+    )
+    compat_report = run_compatibility_checks(merged, runtime_plan, gpu_info, ram_info, disk_info)
+    logger.info(
+        f"Runtime plan: backend={runtime_plan.selected_backend}, "
+        f"offload={runtime_plan.offload_mode}, stream={runtime_plan.streaming_mode}, "
+        f"performance_class={performance_class}"
+    )
     for warning in compat_report["warnings"]:
         logger.warning(f"[compat] {warning}")
     for error in compat_report["errors"]:
@@ -482,7 +548,13 @@ def main():
     
     if runtime_plan.strict_compat and (compat_report["warnings"] or compat_report["errors"]):
         logger.error("Strict compatibility mode enabled and issues were detected. Aborting.")
-        save_startup_report(args.startup_report_path, merged, runtime_plan, compat_report)
+        save_startup_report(
+            args.startup_report_path,
+            merged,
+            runtime_plan,
+            compat_report,
+            performance_class=performance_class
+        )
         return 1
     
     # Verify CUDA availability
@@ -546,7 +618,13 @@ def main():
         else:
             if swap_policy == 'required':
                 logger.error("Swap policy is 'required' and swap creation failed. Aborting.")
-                save_startup_report(args.startup_report_path, merged, runtime_plan, compat_report)
+                save_startup_report(
+                    args.startup_report_path,
+                    merged,
+                    runtime_plan,
+                    compat_report,
+                    performance_class=performance_class
+                )
                 return 1
             logger.warning("Failed to create swap file, continuing without swap")
             swap_manager = None
@@ -593,7 +671,13 @@ def main():
     print(f"✓ DeepSpeed config saved to: {ds_config_path}")
     print_config_summary(ds_config)
     
-    save_startup_report(args.startup_report_path, merged, runtime_plan, compat_report)
+    save_startup_report(
+        args.startup_report_path,
+        merged,
+        runtime_plan,
+        compat_report,
+        performance_class=performance_class
+    )
     logger.info(f"Startup report saved: {args.startup_report_path}")
     
     # ===================
