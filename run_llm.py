@@ -31,6 +31,7 @@ import signal
 import time
 from pathlib import Path
 from typing import Dict, Optional, Any
+from dataclasses import dataclass, asdict
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent
@@ -58,6 +59,18 @@ from utils.memory_tracker import MemoryTracker
 
 # Setup logger
 logger = setup_logger(__name__)
+
+
+@dataclass
+class RuntimePlan:
+    """Resolved runtime execution plan"""
+    selected_backend: str
+    streaming_mode: bool
+    offload_mode: str
+    swap_mode: str
+    precision_mode: str
+    extreme_slow_mode: bool
+    strict_compat: bool
 
 
 # ============================================================================
@@ -100,14 +113,14 @@ IMPORTANT:
     parser.add_argument(
         "--model", "-m",
         type=str,
-        default="openai/gpt-oss-120b",
-        help="HuggingFace model ID (default: openai/gpt-oss-120b)"
+        default=None,
+        help="HuggingFace model ID"
     )
     parser.add_argument(
         "--revision",
         type=str,
-        default="main",
-        help="Model revision/branch (default: main)"
+        default=None,
+        help="Model revision/branch"
     )
     parser.add_argument(
         "--trust-remote-code",
@@ -128,8 +141,8 @@ IMPORTANT:
         "--precision", "-p",
         type=str,
         choices=["fp16", "bf16", "fp32"],
-        default="fp16",
-        help="Precision: fp16 (default), bf16 (Ampere+), fp32 (max quality, 2x memory)"
+        default=None,
+        help="Precision: fp16, bf16 (Ampere+), fp32 (max quality, 2x memory)"
     )
     
     # ===================
@@ -147,10 +160,17 @@ IMPORTANT:
         help="Swap size in GB (auto-calculated if not specified)"
     )
     parser.add_argument(
+        "--swap-policy",
+        type=str,
+        choices=["required", "preferred", "disabled"],
+        default=None,
+        help="Swap policy: required (fail if unavailable), preferred (warn), disabled (never create)"
+    )
+    parser.add_argument(
         "--swap-path",
         type=str,
-        default="./model_swap",
-        help="Path for swap file (default: ./model_swap)"
+        default=None,
+        help="Path for swap file"
     )
     
     # ===================
@@ -159,14 +179,14 @@ IMPORTANT:
     parser.add_argument(
         "--offload-path",
         type=str,
-        default="./offload_dir",
-        help="Path for SSD offloading (default: ./offload_dir)"
+        default=None,
+        help="Path for SSD offloading"
     )
     parser.add_argument(
         "--buffer-size",
         type=int,
-        default=4,
-        help="Buffer size in GB for NVMe offloading (default: 4)"
+        default=None,
+        help="Buffer size in GB for NVMe offloading"
     )
     
     # ===================
@@ -175,8 +195,8 @@ IMPORTANT:
     parser.add_argument(
         "--vram-safety-margin",
         type=int,
-        default=3,
-        help="VRAM safety margin in GB (default: 3)"
+        default=None,
+        help="VRAM safety margin in GB"
     )
     parser.add_argument(
         "--max-vram",
@@ -191,38 +211,38 @@ IMPORTANT:
     parser.add_argument(
         "--prompt",
         type=str,
-        default="HI generate 500 lines of random words poem as each word is 50 letters as line consists of 15 words",
+        default=None,
         help="Input prompt for generation"
     )
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=500,
-        help="Maximum tokens to generate (default: 500)"
+        default=None,
+        help="Maximum tokens to generate"
     )
     parser.add_argument(
         "--temperature",
         type=float,
-        default=0.7,
-        help="Generation temperature (default: 0.7)"
+        default=None,
+        help="Generation temperature"
     )
     parser.add_argument(
         "--top-p",
         type=float,
-        default=0.9,
-        help="Top-p sampling (default: 0.9)"
+        default=None,
+        help="Top-p sampling"
     )
     parser.add_argument(
         "--top-k",
         type=int,
-        default=50,
-        help="Top-k sampling (default: 50)"
+        default=None,
+        help="Top-k sampling"
     )
     parser.add_argument(
         "--repetition-penalty",
         type=float,
-        default=1.1,
-        help="Repetition penalty (default: 1.1)"
+        default=None,
+        help="Repetition penalty"
     )
     
     # ===================
@@ -233,16 +253,28 @@ IMPORTANT:
         action="store_true",
         help="Start interactive chat mode"
     )
+    parser.add_argument("--stream", dest="stream", action="store_true", default=None, help="Enable streaming output")
+    parser.add_argument("--no-stream", dest="stream", action="store_false", help="Disable streaming output")
     parser.add_argument(
-        "--stream",
+        "--disable-deepspeed",
         action="store_true",
-        default=True,
-        help="Stream output (default: True)"
+        help="Force Accelerate loading path instead of DeepSpeed runtime"
     )
     parser.add_argument(
-        "--no-stream",
+        "--strict-compat",
         action="store_true",
-        help="Disable streaming output"
+        help="Fail fast when compatibility checks detect unsupported hardware/runtime"
+    )
+    parser.add_argument(
+        "--extreme-slow-mode",
+        action="store_true",
+        help="Prioritize eventual completion over speed with conservative generation settings"
+    )
+    parser.add_argument(
+        "--runtime-policy",
+        type=str,
+        default=None,
+        help="Named runtime policy pack from config.runtime.policy_packs"
     )
     
     # ===================
@@ -273,6 +305,12 @@ IMPORTANT:
         action="store_true",
         help="Enable verbose output"
     )
+    parser.add_argument(
+        "--startup-report-path",
+        type=str,
+        default="./startup_report.json",
+        help="Path to save resolved startup/runtime report"
+    )
     
     return parser.parse_args()
 
@@ -291,43 +329,283 @@ def merge_config_with_args(config: Dict, args: argparse.Namespace) -> Dict:
     """Merge config file with CLI arguments (CLI takes precedence)"""
     merged = {}
     
+    def _pick(cli_value, config_value, default_value):
+        return cli_value if cli_value is not None else (
+            config_value if config_value is not None else default_value
+        )
+    
     # Model settings
-    merged['model_name'] = args.model or config.get('model', {}).get('name', 'openai/gpt-oss-120b')
-    merged['revision'] = args.revision or config.get('model', {}).get('revision', 'main')
-    merged['trust_remote_code'] = args.trust_remote_code or config.get('model', {}).get('trust_remote_code', False)
-    merged['auth_token'] = args.auth_token or config.get('model', {}).get('use_auth_token')
+    model_cfg = config.get('model', {})
+    merged['model_name'] = _pick(args.model, model_cfg.get('name'), 'openai/gpt-oss-120b')
+    merged['revision'] = _pick(args.revision, model_cfg.get('revision'), 'main')
+    merged['trust_remote_code'] = args.trust_remote_code or model_cfg.get('trust_remote_code', False)
+    merged['auth_token'] = _pick(args.auth_token, model_cfg.get('use_auth_token'), None)
     
     # Precision
-    merged['precision'] = args.precision or config.get('precision', {}).get('type', 'fp16')
+    merged['precision'] = _pick(args.precision, config.get('precision', {}).get('type'), 'fp16')
     
     # Memory
-    merged['vram_safety_margin'] = args.vram_safety_margin or config.get('memory', {}).get('vram_safety_margin_gb', 3)
-    merged['cpu_offload'] = config.get('memory', {}).get('cpu_offload', True)
-    merged['nvme_offload'] = config.get('memory', {}).get('nvme_offload', True)
+    memory_cfg = config.get('memory', {})
+    merged['vram_safety_margin'] = _pick(args.vram_safety_margin, memory_cfg.get('vram_safety_margin_gb'), 3)
+    merged['cpu_offload'] = memory_cfg.get('cpu_offload', True)
+    merged['nvme_offload'] = memory_cfg.get('nvme_offload', True)
     
     # Offload
-    merged['offload_path'] = args.offload_path or config.get('offload', {}).get('offload_path', './offload_dir')
-    merged['buffer_size'] = args.buffer_size or config.get('offload', {}).get('buffer_size_gb', 4)
+    offload_cfg = config.get('offload', {})
+    merged['offload_path'] = _pick(args.offload_path, offload_cfg.get('offload_path'), './offload_dir')
+    merged['buffer_size'] = _pick(args.buffer_size, offload_cfg.get('buffer_size_gb'), 4)
     
     # Swap
-    merged['use_swap'] = args.use_swap or config.get('swap', {}).get('enabled', False)
-    merged['swap_path'] = args.swap_path or config.get('swap', {}).get('path', './model_swap')
+    swap_cfg = config.get('swap', {})
+    merged['use_swap'] = args.use_swap or swap_cfg.get('enabled', False)
+    merged['swap_path'] = _pick(args.swap_path, swap_cfg.get('path'), './model_swap')
     merged['swap_size'] = args.swap_size
-    if merged['swap_size'] is None and config.get('swap', {}).get('size_gb') != 'auto':
-        merged['swap_size'] = config.get('swap', {}).get('size_gb')
+    merged['swap_policy'] = _pick(args.swap_policy, swap_cfg.get('policy'), 'preferred')
+    if merged['swap_size'] is None and swap_cfg.get('size_gb') != 'auto':
+        merged['swap_size'] = swap_cfg.get('size_gb')
     
     # Inference
-    merged['prompt'] = args.prompt
-    merged['max_tokens'] = args.max_tokens or config.get('inference', {}).get('max_new_tokens', 500)
-    merged['temperature'] = args.temperature or config.get('inference', {}).get('temperature', 0.7)
-    merged['top_p'] = args.top_p or config.get('inference', {}).get('top_p', 0.9)
-    merged['top_k'] = args.top_k or config.get('inference', {}).get('top_k', 50)
-    merged['repetition_penalty'] = args.repetition_penalty or config.get('inference', {}).get('repetition_penalty', 1.1)
+    inference_cfg = config.get('inference', {})
+    merged['prompt'] = _pick(
+        args.prompt,
+        config.get('generation_examples', {}).get('poem_example', {}).get('prompt'),
+        "HI generate 500 lines of random words poem as each word is 50 letters as line consists of 15 words"
+    )
+    merged['max_tokens'] = _pick(args.max_tokens, inference_cfg.get('max_new_tokens'), 500)
+    merged['temperature'] = _pick(args.temperature, inference_cfg.get('temperature'), 0.7)
+    merged['top_p'] = _pick(args.top_p, inference_cfg.get('top_p'), 0.9)
+    merged['top_k'] = _pick(args.top_k, inference_cfg.get('top_k'), 50)
+    merged['repetition_penalty'] = _pick(args.repetition_penalty, inference_cfg.get('repetition_penalty'), 1.1)
     
     # Stream
-    merged['stream'] = not args.no_stream if args.no_stream else True
+    merged['stream'] = _pick(args.stream, config.get('performance', {}).get('stream_output'), True)
     
+    # Runtime backend
+    merged['disable_deepspeed'] = args.disable_deepspeed
+    merged['use_deepspeed'] = (not args.disable_deepspeed) and merged['nvme_offload']
+    merged['strict_compat'] = args.strict_compat
+    merged['extreme_slow_mode'] = args.extreme_slow_mode
+    merged['compatibility_profiles'] = config.get('compatibility', {}).get('profiles', {})
+    merged['tested_families'] = config.get(
+        'compatibility', {}
+    ).get('tested_families', ["llama", "mistral", "mixtral", "falcon", "qwen", "phi", "gemma", "opt", "gpt"])
+    merged['runtime_policy'] = _pick(args.runtime_policy, config.get('runtime', {}).get('policy'), None)
+    merged['policy_packs'] = config.get('runtime', {}).get('policy_packs', {})
+
     return merged
+
+
+def build_runtime_plan(merged: Dict) -> RuntimePlan:
+    """Build resolved runtime plan from merged config."""
+    return RuntimePlan(
+        selected_backend="deepspeed" if merged['use_deepspeed'] else "accelerate",
+        streaming_mode=not merged.get('extreme_slow_mode', False) and merged['stream'],
+        offload_mode="nvme" if merged['nvme_offload'] else ("cpu" if merged['cpu_offload'] else "none"),
+        swap_mode=merged.get('swap_policy', 'preferred'),
+        precision_mode=merged['precision'],
+        extreme_slow_mode=merged.get('extreme_slow_mode', False),
+        strict_compat=merged.get('strict_compat', False)
+    )
+
+
+def detect_model_family(model_name: str) -> str:
+    """Best-effort model family detection for compatibility hints."""
+    name = model_name.lower()
+    known = [
+        "llama", "mistral", "mixtral", "falcon", "qwen", "gpt", "phi", "gemma", "opt"
+    ]
+    for fam in known:
+        if fam in name:
+            return fam
+    return "unknown"
+
+
+def classify_performance(usable_vram_gb: float, ram_gb: float) -> str:
+    """Classify expected runtime performance tier."""
+    combined = usable_vram_gb + ram_gb
+    if usable_vram_gb >= 40 and ram_gb >= 64:
+        return "interactive"
+    if combined >= 48:
+        return "slow"
+    if combined >= 24:
+        return "very_slow"
+    return "extreme_slow"
+
+
+def get_family_profile(merged: Dict, family: str) -> Dict:
+    """Get compatibility profile for model family."""
+    profiles = merged.get('compatibility_profiles', {})
+    return profiles.get(family, profiles.get("default", {}))
+
+
+def apply_runtime_policy(merged: Dict) -> Dict:
+    """Apply named runtime policy pack from config."""
+    policy_name = merged.get("runtime_policy")
+    if not policy_name:
+        return merged
+    
+    packs = merged.get("policy_packs", {})
+    policy = packs.get(policy_name)
+    if not policy:
+        logger.warning(f"Runtime policy '{policy_name}' not found; continuing with merged defaults.")
+        return merged
+    
+    logger.info(f"Applying runtime policy pack: {policy_name}")
+    updated = dict(merged)
+    for key, value in policy.items():
+        updated[key] = value
+    
+    # Recompute dependent backend selection if policy changed nvme/disable flags.
+    if "use_deepspeed" not in policy:
+        updated['use_deepspeed'] = (not updated.get('disable_deepspeed', False)) and updated.get('nvme_offload', True)
+    return updated
+
+
+def validate_runtime_policy_conflicts(merged: Dict) -> tuple[Dict, list]:
+    """
+    Validate and normalize contradictory runtime settings.
+    Returns normalized merged config and emits warnings for auto-resolved conflicts.
+    """
+    normalized = dict(merged)
+    actions = []
+    
+    if normalized.get("extreme_slow_mode") and normalized.get("stream"):
+        logger.warning("Conflict: extreme_slow_mode requires non-stream output. Disabling stream.")
+        normalized["stream"] = False
+        actions.append({
+            "setting": "stream",
+            "from": True,
+            "to": False,
+            "reason": "extreme_slow_mode requires non-stream output"
+        })
+    
+    if normalized.get("swap_policy") == "disabled" and normalized.get("use_swap"):
+        logger.warning("Conflict: swap_policy=disabled with use_swap=true. Disabling swap setup.")
+        normalized["use_swap"] = False
+        actions.append({
+            "setting": "use_swap",
+            "from": True,
+            "to": False,
+            "reason": "swap_policy=disabled"
+        })
+    
+    if normalized.get("disable_deepspeed") and normalized.get("use_deepspeed"):
+        logger.warning("Conflict: disable_deepspeed=true with use_deepspeed=true. Forcing use_deepspeed=false.")
+        normalized["use_deepspeed"] = False
+        actions.append({
+            "setting": "use_deepspeed",
+            "from": True,
+            "to": False,
+            "reason": "disable_deepspeed=true"
+        })
+    
+    if normalized.get("use_deepspeed") and not normalized.get("nvme_offload"):
+        logger.warning("DeepSpeed selected without NVMe offload. This is allowed but may be less effective.")
+    
+    return normalized, actions
+
+
+def run_compatibility_checks(
+    merged: Dict,
+    runtime_plan: RuntimePlan,
+    gpu_info: Dict,
+    ram_info: Dict,
+    disk_info: Dict
+) -> Dict:
+    """
+    Run compatibility checks. Returns report with warnings/errors.
+    """
+    report = {"warnings": [], "errors": [], "model_family": detect_model_family(merged['model_name'])}
+    
+    if gpu_info['total_vram_gb'] <= 0:
+        report["errors"].append("No NVIDIA GPU detected via nvidia-smi.")
+    
+    if merged['precision'] == 'bf16':
+        cuda_version = gpu_info.get('cuda_version', 'Unknown')
+        if cuda_version == 'Unknown':
+            report["warnings"].append("BF16 selected but CUDA version is unknown.")
+        elif float(cuda_version) < 11.0:
+            report["errors"].append(f"BF16 selected but CUDA version {cuda_version} is likely incompatible.")
+    
+    if merged['nvme_offload'] and disk_info.get('free_gb', 0) < 50:
+        report["warnings"].append(
+            f"Low offload disk space ({disk_info.get('free_gb', 0):.2f} GB). Large models may fail."
+        )
+    
+    if ram_info.get('available_ram_gb', 0) < 8:
+        report["warnings"].append("Available system RAM is very low (<8GB). Expect severe slowdown or failure.")
+    
+    tested_families = set(merged.get("tested_families", []))
+    if report["model_family"] == "unknown":
+        report["warnings"].append(
+            "Model family could not be identified as a commonly tested architecture."
+        )
+    elif report["model_family"] not in tested_families:
+        report["warnings"].append(
+            f"Model family '{report['model_family']}' is outside currently tested baseline."
+        )
+    
+    # Backend strict profile checks
+    if runtime_plan.selected_backend == "deepspeed" and merged['nvme_offload']:
+        if disk_info.get('free_gb', 0) < 100:
+            report["warnings"].append("DeepSpeed+NVMe selected with <100GB free disk; large models may fail.")
+    
+    if runtime_plan.selected_backend == "accelerate" and merged['model_name'].lower().endswith("120b"):
+        report["warnings"].append("120B-class model on Accelerate backend may be impractically slow or unstable.")
+    
+    # Family profile checks (data-driven)
+    profile = get_family_profile(merged, report["model_family"])
+    if profile:
+        min_cuda = profile.get("min_cuda")
+        if min_cuda and gpu_info.get("cuda_version") not in (None, "Unknown"):
+            try:
+                if float(gpu_info["cuda_version"]) < float(min_cuda):
+                    report["errors"].append(
+                        f"Model family '{report['model_family']}' requires CUDA >= {min_cuda}."
+                    )
+            except ValueError:
+                pass
+        
+        require_trust_remote_code = profile.get("require_trust_remote_code", False)
+        if require_trust_remote_code and not merged.get("trust_remote_code", False):
+            report["warnings"].append(
+                f"Model family '{report['model_family']}' often requires trust_remote_code=true."
+            )
+    
+    return report
+
+
+def save_startup_report(
+    path: str,
+    merged: Dict,
+    runtime_plan: RuntimePlan,
+    compat_report: Dict,
+    performance_class: Optional[str] = None,
+    normalization_actions: Optional[list] = None,
+    failures: Optional[list] = None
+):
+    """Persist startup report for operator diagnostics."""
+    payload = {
+        "timestamp": int(time.time()),
+        "merged_config": merged,
+        "runtime_plan": asdict(runtime_plan),
+        "compatibility": compat_report,
+        "performance_class": performance_class,
+        "runtime_policy": merged.get("runtime_policy"),
+        "normalization_actions": normalization_actions or [],
+        "failures": failures or []
+    }
+    with open(path, 'w') as f:
+        json.dump(payload, f, indent=2)
+
+
+def build_failure(code: str, message: str, remediation: str) -> Dict[str, str]:
+    """Create structured failure payload for startup reports."""
+    return {
+        "code": code,
+        "message": message,
+        "remediation": remediation
+    }
 
 
 # ============================================================================
@@ -340,6 +618,7 @@ def main():
     
     # Print banner
     print_banner()
+    startup_failures = []
     
     # ===================
     # STEP 0: Info mode
@@ -358,6 +637,8 @@ def main():
         merged = merge_config_with_args(config, args)
     else:
         merged = merge_config_with_args({}, args)
+    merged = apply_runtime_policy(merged)
+    merged, normalization_actions = validate_runtime_policy_conflicts(merged)
     
     # ===================
     # STEP 1: Hardware Detection
@@ -371,10 +652,62 @@ def main():
     # Print hardware info
     print_hardware_info(gpu_info, ram_info, disk_info)
     
+    runtime_plan = build_runtime_plan(merged)
+    performance_class = classify_performance(
+        usable_vram_gb=gpu_info.get('usable_vram_gb', 0),
+        ram_gb=ram_info.get('available_ram_gb', 0)
+    )
+    compat_report = run_compatibility_checks(merged, runtime_plan, gpu_info, ram_info, disk_info)
+    logger.info(
+        f"Runtime plan: backend={runtime_plan.selected_backend}, "
+        f"offload={runtime_plan.offload_mode}, stream={runtime_plan.streaming_mode}, "
+        f"performance_class={performance_class}"
+    )
+    for warning in compat_report["warnings"]:
+        logger.warning(f"[compat] {warning}")
+    for error in compat_report["errors"]:
+        logger.error(f"[compat] {error}")
+    
+    if runtime_plan.strict_compat and (compat_report["warnings"] or compat_report["errors"]):
+        logger.error("Strict compatibility mode enabled and issues were detected. Aborting.")
+        startup_failures.append(
+            build_failure(
+                code="COMPAT_STRICT_FAILED",
+                message="Strict compatibility mode blocked startup due to detected warnings/errors.",
+                remediation="Disable --strict-compat or adjust hardware/config/runtime policy."
+            )
+        )
+        save_startup_report(
+            args.startup_report_path,
+            merged,
+            runtime_plan,
+            compat_report,
+            performance_class=performance_class,
+            normalization_actions=normalization_actions,
+            failures=startup_failures
+        )
+        return 1
+    
     # Verify CUDA availability
     if gpu_info['total_vram_gb'] == 0:
         logger.error("No NVIDIA GPU detected or nvidia-smi not available!")
         logger.error("This tool requires an NVIDIA GPU with CUDA drivers installed.")
+        startup_failures.append(
+            build_failure(
+                code="NVIDIA_SMI_UNAVAILABLE",
+                message="No NVIDIA GPU detected or nvidia-smi not available.",
+                remediation="Install NVIDIA drivers/CUDA and ensure nvidia-smi is available in PATH."
+            )
+        )
+        save_startup_report(
+            args.startup_report_path,
+            merged,
+            runtime_plan,
+            compat_report,
+            performance_class=performance_class,
+            normalization_actions=normalization_actions,
+            failures=startup_failures
+        )
         return 1
     
     # Override max VRAM if specified
@@ -409,7 +742,8 @@ def main():
     # STEP 3: Swap Management (Optional)
     # ===================
     swap_manager = None
-    if merged['use_swap']:
+    swap_policy = merged.get('swap_policy', 'preferred')
+    if merged['use_swap'] and swap_policy != 'disabled':
         print_step(3, "Swap Management")
         
         swap_manager = SwapManager(
@@ -429,8 +763,29 @@ def main():
         if swap_manager.create_swap():
             print(f"✓ Swap file created: {merged['swap_path']} ({merged['swap_size']} GB)")
         else:
+            if swap_policy == 'required':
+                logger.error("Swap policy is 'required' and swap creation failed. Aborting.")
+                startup_failures.append(
+                    build_failure(
+                        code="SWAP_REQUIRED_FAILED",
+                        message="Swap policy required swap creation but setup failed.",
+                        remediation="Run with sufficient privileges/tools or change swap policy to preferred."
+                    )
+                )
+                save_startup_report(
+                    args.startup_report_path,
+                    merged,
+                    runtime_plan,
+                    compat_report,
+                    performance_class=performance_class,
+                    normalization_actions=normalization_actions,
+                    failures=startup_failures
+                )
+                return 1
             logger.warning("Failed to create swap file, continuing without swap")
             swap_manager = None
+    elif swap_policy == 'disabled':
+        logger.info("Swap policy is disabled; skipping swap setup.")
     
     # Setup cleanup on exit
     def cleanup_handler(signum=None, frame=None):
@@ -472,6 +827,17 @@ def main():
     print(f"✓ DeepSpeed config saved to: {ds_config_path}")
     print_config_summary(ds_config)
     
+    save_startup_report(
+        args.startup_report_path,
+        merged,
+        runtime_plan,
+        compat_report,
+        performance_class=performance_class,
+        normalization_actions=normalization_actions,
+        failures=startup_failures
+    )
+    logger.info(f"Startup report saved: {args.startup_report_path}")
+    
     # ===================
     # STEP 5: Load Model
     # ===================
@@ -495,12 +861,35 @@ def main():
             revision=merged['revision']
         )
         
-        model, tokenizer = loader.load_model()
+        if merged['use_deepspeed']:
+            logger.info("Loading runtime backend: DeepSpeed ZeRO-3")
+            model, tokenizer = loader.load_model_with_deepspeed(
+                deepspeed_config=ds_config
+            )
+        else:
+            logger.info("Loading runtime backend: Transformers + Accelerate")
+            model, tokenizer = loader.load_model()
         
         print("✓ Model loaded successfully!")
         
     except Exception as e:
         logger.error(f"Failed to load model: {e}")
+        startup_failures.append(
+            build_failure(
+                code="MODEL_LOAD_FAILED",
+                message=str(e),
+                remediation="Check auth token/model id, reduce memory pressure, or switch runtime policy."
+            )
+        )
+        save_startup_report(
+            args.startup_report_path,
+            merged,
+            runtime_plan,
+            compat_report,
+            performance_class=performance_class,
+            normalization_actions=normalization_actions,
+            failures=startup_failures
+        )
         if swap_manager:
             swap_manager.remove_swap()
         return 1
@@ -513,7 +902,7 @@ def main():
     engine = InferenceEngine(
         model=model,
         tokenizer=tokenizer,
-        deepspeed_config=ds_config if merged['nvme_offload'] else None
+        deepspeed_config=ds_config if merged['use_deepspeed'] else None
     )
     
     # Interactive mode
@@ -528,7 +917,20 @@ def main():
         
         start_time = time.time()
         
-        if merged['stream']:
+        if runtime_plan.extreme_slow_mode:
+            logger.warning("Extreme slow mode enabled: using chunked generation for completion-first behavior.")
+            long_engine = LongTextGenerator(
+                model=model,
+                tokenizer=tokenizer,
+                deepspeed_config=ds_config if merged['use_deepspeed'] else None
+            )
+            output = long_engine.generate_in_chunks(
+                prompt=merged['prompt'],
+                total_tokens=merged['max_tokens'],
+                chunk_size=max(64, min(256, merged['max_tokens']))
+            )
+            print(output)
+        elif merged['stream']:
             # Streaming output
             output = ""
             for token in engine.generate(
@@ -605,7 +1007,7 @@ def print_hardware_info(gpu_info: Dict, ram_info: Dict, disk_info: Dict):
     print(f"\n  GPU: {gpu_info['gpu_name']}")
     print(f"  Total VRAM: {gpu_info['total_vram_gb']:.2f} GB")
     print(f"  Free VRAM: {gpu_info['free_vram_gb']:.2f} GB")
-    print(f"  Usable VRAM (Total - {gpu_info.get('safety_margin', 3)}GB margin): {gpu_info['usable_vram_gb']:.2f} GB")
+    print(f"  Usable VRAM (Total - {gpu_info.get('safety_margin_gb', 3)}GB margin): {gpu_info['usable_vram_gb']:.2f} GB")
     print(f"  CUDA Version: {gpu_info['cuda_version']}")
     print(f"  Driver Version: {gpu_info['driver_version']}")
     

@@ -287,14 +287,29 @@ class InferenceEngine:
         """
         logger.info(f"Starting streaming generation for {max_new_tokens} tokens...")
         
-        # Encode input
-        inputs = self.encode_input(prompt)
-        input_length = inputs['input_ids'].shape[1] if hasattr(inputs, 'keys') else inputs.shape[1]
+        # DeepSpeed stream path first to avoid dependency coupling on HF streamer imports.
+        if self._is_deepspeed:
+            for token in self._generate_deepspeed_stream(
+                prompt=prompt,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                repetition_penalty=repetition_penalty,
+                do_sample=do_sample,
+                **kwargs
+            ):
+                yield token
+            return
         
         try:
             import torch
             from transformers import TextIteratorStreamer
             import threading
+            
+            # Encode input
+            inputs = self.encode_input(prompt)
+            input_length = inputs['input_ids'].shape[1] if hasattr(inputs, 'keys') else inputs.shape[1]
             
             # Create streamer
             streamer = TextIteratorStreamer(
@@ -350,6 +365,71 @@ class InferenceEngine:
                 **kwargs
             )
             yield result
+    
+    def _generate_deepspeed_stream(
+        self,
+        prompt: str,
+        max_new_tokens: int,
+        temperature: float,
+        top_p: float,
+        top_k: int,
+        repetition_penalty: float,
+        do_sample: bool,
+        **kwargs
+    ) -> Generator[str, None, None]:
+        """
+        Stream generation with DeepSpeed backend via incremental token steps.
+        
+        Note: This prioritizes compatibility and deterministic progress over speed.
+        """
+        import torch
+        
+        logger.info("Using DeepSpeed incremental streaming mode")
+        inputs = self.encode_input(prompt)
+        generated = inputs["input_ids"]
+        attention_mask = inputs.get("attention_mask", None)
+        
+        with torch.no_grad():
+            for _ in range(max_new_tokens):
+                generation_config = {
+                    "max_new_tokens": 1,
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "top_k": top_k,
+                    "repetition_penalty": repetition_penalty,
+                    "do_sample": do_sample,
+                    "pad_token_id": self.tokenizer.pad_token_id,
+                    "eos_token_id": self.tokenizer.eos_token_id,
+                    "use_cache": True,
+                }
+                generation_config.update(kwargs)
+                
+                outputs = self.model.generate(
+                    input_ids=generated,
+                    attention_mask=attention_mask,
+                    **generation_config
+                )
+                
+                next_token_id = outputs[:, -1:]
+                token_text = self.decode_output(next_token_id[0], skip_special_tokens=True)
+                
+                if token_text:
+                    yield token_text
+                
+                generated = outputs
+                if attention_mask is not None:
+                    ones = torch.ones(
+                        (attention_mask.shape[0], 1),
+                        dtype=attention_mask.dtype,
+                        device=attention_mask.device
+                    )
+                    attention_mask = torch.cat([attention_mask, ones], dim=1)
+                
+                if self.tokenizer.eos_token_id is not None and int(next_token_id.item()) == int(self.tokenizer.eos_token_id):
+                    break
+                
+                if self.cleanup_interval > 0:
+                    self._cleanup_memory()
     
     def _generate_deepspeed(self, inputs: Any, generation_config: Dict) -> Any:
         """

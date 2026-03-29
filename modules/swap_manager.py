@@ -172,6 +172,22 @@ class SwapManager:
             logger.error("Swap size not specified. Set swap_size_gb or call calculate_recommended_swap()")
             return False
         
+        # Preflight checks for required privileges and tools
+        if hasattr(os, "geteuid") and os.geteuid() != 0:
+            logger.error(
+                "Swap creation requires root privileges (mkswap/swapon). "
+                "Run with sudo or configure system swap manually."
+            )
+            return False
+        
+        required_tools = ['fallocate', 'mkswap', 'swapon']
+        missing_tools = [tool for tool in required_tools if shutil.which(tool) is None]
+        if missing_tools:
+            logger.error(
+                f"Missing required tools for swap creation: {', '.join(missing_tools)}"
+            )
+            return False
+        
         # Store original swap info
         self._original_swap_info = self.get_current_swap_info()
         
