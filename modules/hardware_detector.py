@@ -134,6 +134,7 @@ def get_gpu_info(safety_margin_gb: int = 3) -> Dict:
             'total_vram_gb': 0.0,
             'free_vram_gb': 0.0,
             'usable_vram_gb': 0.0,
+            'safety_margin_gb': safety_margin_gb,
             'cuda_version': 'Unknown',
             'driver_version': 'Unknown',
             'gpus': []
@@ -152,6 +153,7 @@ def get_gpu_info(safety_margin_gb: int = 3) -> Dict:
             'total_vram_gb': 0.0,
             'free_vram_gb': 0.0,
             'usable_vram_gb': 0.0,
+            'safety_margin_gb': safety_margin_gb,
             'cuda_version': 'Unknown',
             'driver_version': 'Unknown',
             'gpus': []
@@ -207,6 +209,7 @@ def get_gpu_info(safety_margin_gb: int = 3) -> Dict:
             'total_vram_gb': 0.0,
             'free_vram_gb': 0.0,
             'usable_vram_gb': 0.0,
+            'safety_margin_gb': safety_margin_gb,
             'cuda_version': cuda_version,
             'driver_version': driver_version,
             'gpus': []
@@ -219,6 +222,7 @@ def get_gpu_info(safety_margin_gb: int = 3) -> Dict:
         'total_vram_gb': primary_gpu.total_vram_gb,
         'free_vram_gb': primary_gpu.free_vram_gb,
         'usable_vram_gb': max(0, primary_gpu.total_vram_gb - safety_margin_gb),
+        'safety_margin_gb': safety_margin_gb,
         'cuda_version': cuda_version,
         'driver_version': driver_version,
         'gpus': gpus

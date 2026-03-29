@@ -100,14 +100,14 @@ IMPORTANT:
     parser.add_argument(
         "--model", "-m",
         type=str,
-        default="openai/gpt-oss-120b",
-        help="HuggingFace model ID (default: openai/gpt-oss-120b)"
+        default=None,
+        help="HuggingFace model ID"
     )
     parser.add_argument(
         "--revision",
         type=str,
-        default="main",
-        help="Model revision/branch (default: main)"
+        default=None,
+        help="Model revision/branch"
     )
     parser.add_argument(
         "--trust-remote-code",
@@ -128,8 +128,8 @@ IMPORTANT:
         "--precision", "-p",
         type=str,
         choices=["fp16", "bf16", "fp32"],
-        default="fp16",
-        help="Precision: fp16 (default), bf16 (Ampere+), fp32 (max quality, 2x memory)"
+        default=None,
+        help="Precision: fp16, bf16 (Ampere+), fp32 (max quality, 2x memory)"
     )
     
     # ===================
@@ -149,8 +149,8 @@ IMPORTANT:
     parser.add_argument(
         "--swap-path",
         type=str,
-        default="./model_swap",
-        help="Path for swap file (default: ./model_swap)"
+        default=None,
+        help="Path for swap file"
     )
     
     # ===================
@@ -159,14 +159,14 @@ IMPORTANT:
     parser.add_argument(
         "--offload-path",
         type=str,
-        default="./offload_dir",
-        help="Path for SSD offloading (default: ./offload_dir)"
+        default=None,
+        help="Path for SSD offloading"
     )
     parser.add_argument(
         "--buffer-size",
         type=int,
-        default=4,
-        help="Buffer size in GB for NVMe offloading (default: 4)"
+        default=None,
+        help="Buffer size in GB for NVMe offloading"
     )
     
     # ===================
@@ -175,8 +175,8 @@ IMPORTANT:
     parser.add_argument(
         "--vram-safety-margin",
         type=int,
-        default=3,
-        help="VRAM safety margin in GB (default: 3)"
+        default=None,
+        help="VRAM safety margin in GB"
     )
     parser.add_argument(
         "--max-vram",
@@ -191,38 +191,38 @@ IMPORTANT:
     parser.add_argument(
         "--prompt",
         type=str,
-        default="HI generate 500 lines of random words poem as each word is 50 letters as line consists of 15 words",
+        default=None,
         help="Input prompt for generation"
     )
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=500,
-        help="Maximum tokens to generate (default: 500)"
+        default=None,
+        help="Maximum tokens to generate"
     )
     parser.add_argument(
         "--temperature",
         type=float,
-        default=0.7,
-        help="Generation temperature (default: 0.7)"
+        default=None,
+        help="Generation temperature"
     )
     parser.add_argument(
         "--top-p",
         type=float,
-        default=0.9,
-        help="Top-p sampling (default: 0.9)"
+        default=None,
+        help="Top-p sampling"
     )
     parser.add_argument(
         "--top-k",
         type=int,
-        default=50,
-        help="Top-k sampling (default: 50)"
+        default=None,
+        help="Top-k sampling"
     )
     parser.add_argument(
         "--repetition-penalty",
         type=float,
-        default=1.1,
-        help="Repetition penalty (default: 1.1)"
+        default=None,
+        help="Repetition penalty"
     )
     
     # ===================
@@ -233,16 +233,12 @@ IMPORTANT:
         action="store_true",
         help="Start interactive chat mode"
     )
+    parser.add_argument("--stream", dest="stream", action="store_true", default=None, help="Enable streaming output")
+    parser.add_argument("--no-stream", dest="stream", action="store_false", help="Disable streaming output")
     parser.add_argument(
-        "--stream",
+        "--disable-deepspeed",
         action="store_true",
-        default=True,
-        help="Stream output (default: True)"
-    )
-    parser.add_argument(
-        "--no-stream",
-        action="store_true",
-        help="Disable streaming output"
+        help="Force Accelerate loading path instead of DeepSpeed runtime"
     )
     
     # ===================
@@ -291,42 +287,59 @@ def merge_config_with_args(config: Dict, args: argparse.Namespace) -> Dict:
     """Merge config file with CLI arguments (CLI takes precedence)"""
     merged = {}
     
+    def _pick(cli_value, config_value, default_value):
+        return cli_value if cli_value is not None else (
+            config_value if config_value is not None else default_value
+        )
+    
     # Model settings
-    merged['model_name'] = args.model or config.get('model', {}).get('name', 'openai/gpt-oss-120b')
-    merged['revision'] = args.revision or config.get('model', {}).get('revision', 'main')
-    merged['trust_remote_code'] = args.trust_remote_code or config.get('model', {}).get('trust_remote_code', False)
-    merged['auth_token'] = args.auth_token or config.get('model', {}).get('use_auth_token')
+    model_cfg = config.get('model', {})
+    merged['model_name'] = _pick(args.model, model_cfg.get('name'), 'openai/gpt-oss-120b')
+    merged['revision'] = _pick(args.revision, model_cfg.get('revision'), 'main')
+    merged['trust_remote_code'] = args.trust_remote_code or model_cfg.get('trust_remote_code', False)
+    merged['auth_token'] = _pick(args.auth_token, model_cfg.get('use_auth_token'), None)
     
     # Precision
-    merged['precision'] = args.precision or config.get('precision', {}).get('type', 'fp16')
+    merged['precision'] = _pick(args.precision, config.get('precision', {}).get('type'), 'fp16')
     
     # Memory
-    merged['vram_safety_margin'] = args.vram_safety_margin or config.get('memory', {}).get('vram_safety_margin_gb', 3)
-    merged['cpu_offload'] = config.get('memory', {}).get('cpu_offload', True)
-    merged['nvme_offload'] = config.get('memory', {}).get('nvme_offload', True)
+    memory_cfg = config.get('memory', {})
+    merged['vram_safety_margin'] = _pick(args.vram_safety_margin, memory_cfg.get('vram_safety_margin_gb'), 3)
+    merged['cpu_offload'] = memory_cfg.get('cpu_offload', True)
+    merged['nvme_offload'] = memory_cfg.get('nvme_offload', True)
     
     # Offload
-    merged['offload_path'] = args.offload_path or config.get('offload', {}).get('offload_path', './offload_dir')
-    merged['buffer_size'] = args.buffer_size or config.get('offload', {}).get('buffer_size_gb', 4)
+    offload_cfg = config.get('offload', {})
+    merged['offload_path'] = _pick(args.offload_path, offload_cfg.get('offload_path'), './offload_dir')
+    merged['buffer_size'] = _pick(args.buffer_size, offload_cfg.get('buffer_size_gb'), 4)
     
     # Swap
-    merged['use_swap'] = args.use_swap or config.get('swap', {}).get('enabled', False)
-    merged['swap_path'] = args.swap_path or config.get('swap', {}).get('path', './model_swap')
+    swap_cfg = config.get('swap', {})
+    merged['use_swap'] = args.use_swap or swap_cfg.get('enabled', False)
+    merged['swap_path'] = _pick(args.swap_path, swap_cfg.get('path'), './model_swap')
     merged['swap_size'] = args.swap_size
-    if merged['swap_size'] is None and config.get('swap', {}).get('size_gb') != 'auto':
-        merged['swap_size'] = config.get('swap', {}).get('size_gb')
+    if merged['swap_size'] is None and swap_cfg.get('size_gb') != 'auto':
+        merged['swap_size'] = swap_cfg.get('size_gb')
     
     # Inference
-    merged['prompt'] = args.prompt
-    merged['max_tokens'] = args.max_tokens or config.get('inference', {}).get('max_new_tokens', 500)
-    merged['temperature'] = args.temperature or config.get('inference', {}).get('temperature', 0.7)
-    merged['top_p'] = args.top_p or config.get('inference', {}).get('top_p', 0.9)
-    merged['top_k'] = args.top_k or config.get('inference', {}).get('top_k', 50)
-    merged['repetition_penalty'] = args.repetition_penalty or config.get('inference', {}).get('repetition_penalty', 1.1)
+    inference_cfg = config.get('inference', {})
+    merged['prompt'] = _pick(
+        args.prompt,
+        config.get('generation_examples', {}).get('poem_example', {}).get('prompt'),
+        "HI generate 500 lines of random words poem as each word is 50 letters as line consists of 15 words"
+    )
+    merged['max_tokens'] = _pick(args.max_tokens, inference_cfg.get('max_new_tokens'), 500)
+    merged['temperature'] = _pick(args.temperature, inference_cfg.get('temperature'), 0.7)
+    merged['top_p'] = _pick(args.top_p, inference_cfg.get('top_p'), 0.9)
+    merged['top_k'] = _pick(args.top_k, inference_cfg.get('top_k'), 50)
+    merged['repetition_penalty'] = _pick(args.repetition_penalty, inference_cfg.get('repetition_penalty'), 1.1)
     
     # Stream
-    merged['stream'] = not args.no_stream if args.no_stream else True
+    merged['stream'] = _pick(args.stream, config.get('performance', {}).get('stream_output'), True)
     
+    # Runtime backend
+    merged['use_deepspeed'] = (not args.disable_deepspeed) and merged['nvme_offload']
+
     return merged
 
 
@@ -495,7 +508,14 @@ def main():
             revision=merged['revision']
         )
         
-        model, tokenizer = loader.load_model()
+        if merged['use_deepspeed']:
+            logger.info("Loading runtime backend: DeepSpeed ZeRO-3")
+            model, tokenizer = loader.load_model_with_deepspeed(
+                deepspeed_config=ds_config
+            )
+        else:
+            logger.info("Loading runtime backend: Transformers + Accelerate")
+            model, tokenizer = loader.load_model()
         
         print("✓ Model loaded successfully!")
         
@@ -513,7 +533,7 @@ def main():
     engine = InferenceEngine(
         model=model,
         tokenizer=tokenizer,
-        deepspeed_config=ds_config if merged['nvme_offload'] else None
+        deepspeed_config=ds_config if merged['use_deepspeed'] else None
     )
     
     # Interactive mode
@@ -605,7 +625,7 @@ def print_hardware_info(gpu_info: Dict, ram_info: Dict, disk_info: Dict):
     print(f"\n  GPU: {gpu_info['gpu_name']}")
     print(f"  Total VRAM: {gpu_info['total_vram_gb']:.2f} GB")
     print(f"  Free VRAM: {gpu_info['free_vram_gb']:.2f} GB")
-    print(f"  Usable VRAM (Total - {gpu_info.get('safety_margin', 3)}GB margin): {gpu_info['usable_vram_gb']:.2f} GB")
+    print(f"  Usable VRAM (Total - {gpu_info.get('safety_margin_gb', 3)}GB margin): {gpu_info['usable_vram_gb']:.2f} GB")
     print(f"  CUDA Version: {gpu_info['cuda_version']}")
     print(f"  Driver Version: {gpu_info['driver_version']}")
     

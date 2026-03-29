@@ -296,6 +296,26 @@ class InferenceEngine:
             from transformers import TextIteratorStreamer
             import threading
             
+            # DeepSpeed engines may not support streamer/threaded generation
+            # identically to plain HF models. Use safe fallback.
+            if self._is_deepspeed:
+                logger.warning(
+                    "Streaming with DeepSpeed backend is not fully supported; "
+                    "falling back to non-stream generation."
+                )
+                result = self._generate_batch(
+                    prompt=prompt,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    top_k=top_k,
+                    repetition_penalty=repetition_penalty,
+                    do_sample=do_sample,
+                    **kwargs
+                )
+                yield result
+                return
+            
             # Create streamer
             streamer = TextIteratorStreamer(
                 self.tokenizer,
