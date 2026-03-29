@@ -461,29 +461,48 @@ def apply_runtime_policy(merged: Dict) -> Dict:
     return updated
 
 
-def validate_runtime_policy_conflicts(merged: Dict) -> Dict:
+def validate_runtime_policy_conflicts(merged: Dict) -> tuple[Dict, list]:
     """
     Validate and normalize contradictory runtime settings.
     Returns normalized merged config and emits warnings for auto-resolved conflicts.
     """
     normalized = dict(merged)
+    actions = []
     
     if normalized.get("extreme_slow_mode") and normalized.get("stream"):
         logger.warning("Conflict: extreme_slow_mode requires non-stream output. Disabling stream.")
         normalized["stream"] = False
+        actions.append({
+            "setting": "stream",
+            "from": True,
+            "to": False,
+            "reason": "extreme_slow_mode requires non-stream output"
+        })
     
     if normalized.get("swap_policy") == "disabled" and normalized.get("use_swap"):
         logger.warning("Conflict: swap_policy=disabled with use_swap=true. Disabling swap setup.")
         normalized["use_swap"] = False
+        actions.append({
+            "setting": "use_swap",
+            "from": True,
+            "to": False,
+            "reason": "swap_policy=disabled"
+        })
     
     if normalized.get("disable_deepspeed") and normalized.get("use_deepspeed"):
         logger.warning("Conflict: disable_deepspeed=true with use_deepspeed=true. Forcing use_deepspeed=false.")
         normalized["use_deepspeed"] = False
+        actions.append({
+            "setting": "use_deepspeed",
+            "from": True,
+            "to": False,
+            "reason": "disable_deepspeed=true"
+        })
     
     if normalized.get("use_deepspeed") and not normalized.get("nvme_offload"):
         logger.warning("DeepSpeed selected without NVMe offload. This is allowed but may be less effective.")
     
-    return normalized
+    return normalized, actions
 
 
 def run_compatibility_checks(
@@ -561,7 +580,8 @@ def save_startup_report(
     merged: Dict,
     runtime_plan: RuntimePlan,
     compat_report: Dict,
-    performance_class: Optional[str] = None
+    performance_class: Optional[str] = None,
+    normalization_actions: Optional[list] = None
 ):
     """Persist startup report for operator diagnostics."""
     payload = {
@@ -569,7 +589,9 @@ def save_startup_report(
         "merged_config": merged,
         "runtime_plan": asdict(runtime_plan),
         "compatibility": compat_report,
-        "performance_class": performance_class
+        "performance_class": performance_class,
+        "runtime_policy": merged.get("runtime_policy"),
+        "normalization_actions": normalization_actions or []
     }
     with open(path, 'w') as f:
         json.dump(payload, f, indent=2)
@@ -604,7 +626,7 @@ def main():
     else:
         merged = merge_config_with_args({}, args)
     merged = apply_runtime_policy(merged)
-    merged = validate_runtime_policy_conflicts(merged)
+    merged, normalization_actions = validate_runtime_policy_conflicts(merged)
     
     # ===================
     # STEP 1: Hardware Detection
@@ -641,7 +663,8 @@ def main():
             merged,
             runtime_plan,
             compat_report,
-            performance_class=performance_class
+            performance_class=performance_class,
+            normalization_actions=normalization_actions
         )
         return 1
     
@@ -711,7 +734,8 @@ def main():
                     merged,
                     runtime_plan,
                     compat_report,
-                    performance_class=performance_class
+                    performance_class=performance_class,
+                    normalization_actions=normalization_actions
                 )
                 return 1
             logger.warning("Failed to create swap file, continuing without swap")
@@ -764,7 +788,8 @@ def main():
         merged,
         runtime_plan,
         compat_report,
-        performance_class=performance_class
+        performance_class=performance_class,
+        normalization_actions=normalization_actions
     )
     logger.info(f"Startup report saved: {args.startup_report_path}")
     

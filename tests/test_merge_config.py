@@ -105,7 +105,8 @@ def test_validate_runtime_policy_conflicts_normalizes_values():
         "use_deepspeed": True,
         "nvme_offload": False,
     }
-    normalized = validate_runtime_policy_conflicts(merged)
+    normalized, actions = validate_runtime_policy_conflicts(merged)
     assert normalized["stream"] is False
     assert normalized["use_swap"] is False
     assert normalized["use_deepspeed"] is False
+    assert len(actions) >= 3

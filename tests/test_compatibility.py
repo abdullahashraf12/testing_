@@ -1,4 +1,12 @@
-from run_llm import RuntimePlan, detect_model_family, classify_performance, run_compatibility_checks
+import json
+
+from run_llm import (
+    RuntimePlan,
+    detect_model_family,
+    classify_performance,
+    run_compatibility_checks,
+    save_startup_report,
+)
 
 
 def test_detect_model_family():
@@ -60,3 +68,29 @@ def test_family_profile_enforces_min_cuda_and_trust_remote_code_warning():
     report = run_compatibility_checks(merged, plan, gpu, ram, disk)
     assert any("requires CUDA >=" in e for e in report["errors"])
     assert any("trust_remote_code=true" in w for w in report["warnings"])
+
+
+def test_startup_report_persists_normalization_actions(tmp_path):
+    path = tmp_path / "report.json"
+    merged = {"runtime_policy": "deepspeed_strict"}
+    plan = RuntimePlan(
+        selected_backend="deepspeed",
+        streaming_mode=False,
+        offload_mode="nvme",
+        swap_mode="preferred",
+        precision_mode="fp16",
+        extreme_slow_mode=False,
+        strict_compat=True,
+    )
+    save_startup_report(
+        str(path),
+        merged,
+        plan,
+        compat_report={"warnings": [], "errors": []},
+        performance_class="slow",
+        normalization_actions=[{"setting": "stream", "from": True, "to": False, "reason": "test"}],
+    )
+    with open(path, "r") as f:
+        payload = json.load(f)
+    assert payload["runtime_policy"] == "deepspeed_strict"
+    assert len(payload["normalization_actions"]) == 1
