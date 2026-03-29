@@ -243,6 +243,36 @@
         ]
     },
 
+    "compatibility": {
+        "tested_families": [
+            "llama",
+            "mistral",
+            "mixtral",
+            "falcon",
+            "qwen",
+            "phi",
+            "gemma",
+            "opt",
+            "gpt"
+        ],
+        "_comment_tested_families": "Families considered baseline-tested in this project.",
+        "profiles": {
+            "default": {
+                "min_cuda": "11.0",
+                "require_trust_remote_code": false
+            },
+            "qwen": {
+                "min_cuda": "11.0",
+                "require_trust_remote_code": false
+            },
+            "llama": {
+                "min_cuda": "11.0",
+                "require_trust_remote_code": false
+            }
+        },
+        "_comment_profiles": "Per-family compatibility rules (data-driven, can be customized)."
+    },
+
     "___final_comment___": "============================================================",
     "___quick_start___": [
         "QUICK START GUIDE:",

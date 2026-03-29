@@ -378,6 +378,10 @@ def merge_config_with_args(config: Dict, args: argparse.Namespace) -> Dict:
     merged['use_deepspeed'] = (not args.disable_deepspeed) and merged['nvme_offload']
     merged['strict_compat'] = args.strict_compat
     merged['extreme_slow_mode'] = args.extreme_slow_mode
+    merged['compatibility_profiles'] = config.get('compatibility', {}).get('profiles', {})
+    merged['tested_families'] = config.get(
+        'compatibility', {}
+    ).get('tested_families', ["llama", "mistral", "mixtral", "falcon", "qwen", "phi", "gemma", "opt", "gpt"])
 
     return merged
 
@@ -419,6 +423,12 @@ def classify_performance(usable_vram_gb: float, ram_gb: float) -> str:
     return "extreme_slow"
 
 
+def get_family_profile(merged: Dict, family: str) -> Dict:
+    """Get compatibility profile for model family."""
+    profiles = merged.get('compatibility_profiles', {})
+    return profiles.get(family, profiles.get("default", {}))
+
+
 def run_compatibility_checks(
     merged: Dict,
     runtime_plan: RuntimePlan,
@@ -449,7 +459,7 @@ def run_compatibility_checks(
     if ram_info.get('available_ram_gb', 0) < 8:
         report["warnings"].append("Available system RAM is very low (<8GB). Expect severe slowdown or failure.")
     
-    tested_families = {"llama", "mistral", "mixtral", "falcon", "qwen", "phi", "gemma", "opt", "gpt"}
+    tested_families = set(merged.get("tested_families", []))
     if report["model_family"] == "unknown":
         report["warnings"].append(
             "Model family could not be identified as a commonly tested architecture."
@@ -466,6 +476,25 @@ def run_compatibility_checks(
     
     if runtime_plan.selected_backend == "accelerate" and merged['model_name'].lower().endswith("120b"):
         report["warnings"].append("120B-class model on Accelerate backend may be impractically slow or unstable.")
+    
+    # Family profile checks (data-driven)
+    profile = get_family_profile(merged, report["model_family"])
+    if profile:
+        min_cuda = profile.get("min_cuda")
+        if min_cuda and gpu_info.get("cuda_version") not in (None, "Unknown"):
+            try:
+                if float(gpu_info["cuda_version"]) < float(min_cuda):
+                    report["errors"].append(
+                        f"Model family '{report['model_family']}' requires CUDA >= {min_cuda}."
+                    )
+            except ValueError:
+                pass
+        
+        require_trust_remote_code = profile.get("require_trust_remote_code", False)
+        if require_trust_remote_code and not merged.get("trust_remote_code", False):
+            report["warnings"].append(
+                f"Model family '{report['model_family']}' often requires trust_remote_code=true."
+            )
     
     return report
 

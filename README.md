@@ -227,6 +227,7 @@ The `config.json` file provides comprehensive configuration options:
 - Not every HuggingFace model architecture is guaranteed to work identically.
 - Very low VRAM systems may run in extreme-slow conditions (completion-first, throughput may be very low).
 - Use `--strict-compat` to fail fast when compatibility checks detect issues.
+- Compatibility rules are data-driven through `config.json -> compatibility.profiles`.
 
 ---
 

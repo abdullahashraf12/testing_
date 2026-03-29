@@ -33,3 +33,30 @@ def test_compatibility_warns_on_unknown_family_and_low_disk():
     assert any("Model family could not be identified" in w for w in report["warnings"])
     assert any("Low offload disk space" in w for w in report["warnings"])
 
+
+def test_family_profile_enforces_min_cuda_and_trust_remote_code_warning():
+    merged = {
+        "model_name": "qwen/Qwen2.5-7B",
+        "precision": "fp16",
+        "nvme_offload": False,
+        "trust_remote_code": False,
+        "compatibility_profiles": {
+            "qwen": {"min_cuda": "12.0", "require_trust_remote_code": True}
+        },
+        "tested_families": ["qwen"],
+    }
+    plan = RuntimePlan(
+        selected_backend="accelerate",
+        streaming_mode=True,
+        offload_mode="cpu",
+        swap_mode="preferred",
+        precision_mode="fp16",
+        extreme_slow_mode=False,
+        strict_compat=False,
+    )
+    gpu = {"total_vram_gb": 24, "cuda_version": "11.8"}
+    ram = {"available_ram_gb": 32}
+    disk = {"free_gb": 200}
+    report = run_compatibility_checks(merged, plan, gpu, ram, disk)
+    assert any("requires CUDA >=" in e for e in report["errors"])
+    assert any("trust_remote_code=true" in w for w in report["warnings"])
